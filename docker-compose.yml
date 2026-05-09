@@ -1,0 +1,32 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: timelinegpt-backend
+    ports:
+      - "8794:8794"
+    environment:
+      - PORT=8794
+      - JWT_SECRET=timelinegpt_secret_key_change_in_production
+      - AI_API_KEY=
+      - AI_API_URL=https://api.openai.com/v1/chat/completions
+    volumes:
+      - backend-data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: timelinegpt-frontend
+    ports:
+      - "8081:8081"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend-data:
