@@ -6,6 +6,7 @@ import api from '../utils/api';
 import Sidebar from '../components/Sidebar';
 import SettingsModal from '../components/SettingsModal';
 import MessageBubble from '../components/MessageBubble';
+import StreamingMessage from '../components/StreamingMessage';
 import TypingIndicator from '../components/TypingIndicator';
 
 export default function ChatPage() {
@@ -17,6 +18,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
@@ -24,6 +26,7 @@ export default function ChatPage() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const messageRefs = useRef({});
+  const abortControllerRef = useRef(null);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -69,7 +72,7 @@ export default function ChatPage() {
     if (settings.autoScroll && !highlightMessageId) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, settings.autoScroll, highlightMessageId]);
+  }, [messages, streamingContent, settings.autoScroll, highlightMessageId]);
 
   const createNew = async () => {
     try {
@@ -106,6 +109,13 @@ export default function ChatPage() {
     }
   };
 
+  const stopGeneration = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }, []);
+
   const sendMessage = async () => {
     if (!input.trim() || sending) return;
     let convo = activeConvo;
@@ -125,16 +135,52 @@ export default function ChatPage() {
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setSending(true);
+    setStreamingContent('');
+
+    let accumulated = '';
+
     try {
-      const data = await api.sendMessage(convo.id, userMsg.content);
-      setMessages(data.messages);
-      if (data.isMock) setDemoMode(true);
-      loadConversations();
+      const controller = api.sendMessageStream(convo.id, userMsg.content, {
+        onChunk: (chunk, isMock) => {
+          accumulated += chunk;
+          setStreamingContent(accumulated);
+          if (isMock) setDemoMode(true);
+        },
+        onDone: (isMock) => {
+          if (isMock) setDemoMode(true);
+          const finalContent = accumulated || '（回复被中断）';
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            content: finalContent,
+            created_at: new Date().toISOString()
+          }]);
+          setStreamingContent('');
+          setSending(false);
+          abortControllerRef.current = null;
+          loadConversations();
+        },
+        onError: (err) => {
+          console.error('Stream error:', err);
+          const finalContent = accumulated || '抱歉，出了点问题，请重试。';
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            content: finalContent,
+            created_at: new Date().toISOString()
+          }]);
+          setStreamingContent('');
+          setSending(false);
+          abortControllerRef.current = null;
+        }
+      });
+      abortControllerRef.current = controller;
     } catch (err) {
       console.error('Failed to send message:', err);
       setMessages(prev => [...prev, { id: Date.now() + 1, role: 'assistant', content: '抱歉，出了点问题，请重试。', created_at: new Date().toISOString() }]);
-    } finally {
+      setStreamingContent('');
       setSending(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -160,7 +206,7 @@ export default function ChatPage() {
         </header>
 
         <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 ? (
+          {messages.length === 0 && !streamingContent ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-8 animate-fade-in">
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center mb-6 shadow-lg shadow-primary-900/30">
                 <span className="text-2xl font-bold text-white">T</span>
@@ -191,7 +237,8 @@ export default function ChatPage() {
                   <MessageBubble message={msg} />
                 </div>
               ))}
-              {sending && <TypingIndicator />}
+              {streamingContent && <StreamingMessage content={streamingContent} />}
+              {sending && !streamingContent && <TypingIndicator />}
               <div ref={messagesEndRef} />
             </div>
           )}
@@ -205,10 +252,17 @@ export default function ChatPage() {
               style={{ minHeight: '64px', maxHeight: '160px' }}
               onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
             />
-            <button onClick={sendMessage} disabled={!input.trim() || sending}
-              className="absolute right-3 bottom-4 p-2 rounded-lg bg-primary-600 hover:bg-primary-500 disabled:opacity-30 disabled:hover:bg-primary-600 transition" aria-label="发送消息">
-              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19V5m-7 7l7-7 7 7" /></svg>
-            </button>
+            {sending ? (
+              <button onClick={stopGeneration}
+                className="absolute right-3 bottom-4 p-2 rounded-lg bg-red-600 hover:bg-red-500 transition" aria-label="停止生成">
+                <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1" /></svg>
+              </button>
+            ) : (
+              <button onClick={sendMessage} disabled={!input.trim()}
+                className="absolute right-3 bottom-4 p-2 rounded-lg bg-primary-600 hover:bg-primary-500 disabled:opacity-30 disabled:hover:bg-primary-600 transition" aria-label="发送消息">
+                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19V5m-7 7l7-7 7 7" /></svg>
+              </button>
+            )}
           </div>
           <p className="text-center text-xs text-surface-600 mt-2">
             {demoMode && <span className="text-amber-500/80">⚡ 演示模式：AI 回复为模拟数据 · </span>}
