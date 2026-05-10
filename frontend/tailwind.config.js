@@ -26,6 +26,7 @@ export default {
         'float-delay': 'float 8s ease-in-out 2s infinite',
         'float-slow': 'float 10s ease-in-out 4s infinite',
         'glow-pulse': 'glowPulse 4s ease-in-out infinite',
+        'streaming-cursor': 'streamingCursor 1s step-end infinite',
       },
       keyframes: {
         fadeIn: { '0%': { opacity: '0', transform: 'translateY(8px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
@@ -33,6 +34,7 @@ export default {
         pulseDot: { '0%, 80%, 100%': { transform: 'scale(0)' }, '40%': { transform: 'scale(1)' } },
         float: { '0%, 100%': { transform: 'translateY(0px)' }, '50%': { transform: 'translateY(-20px)' } },
         glowPulse: { '0%, 100%': { opacity: '0.4' }, '50%': { opacity: '0.8' } },
+        streamingCursor: { '0%, 100%': { opacity: '1' }, '50%': { opacity: '0' } },
       }
     }
   },

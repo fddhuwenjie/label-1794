@@ -59,4 +59,76 @@ function generateFallbackResponse(history) {
   return responses[Math.floor(Math.random() * responses.length)];
 }
 
-module.exports = { chat, isConfigured, AI_CONFIG };
+async function* chatStream(history) {
+  if (!isConfigured()) {
+    yield* mockStream(generateFallbackResponse(history));
+    return;
+  }
+
+  try {
+    const response = await fetch(AI_CONFIG.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: AI_CONFIG.model,
+        messages: [{ role: 'system', content: AI_CONFIG.systemPrompt }, ...history],
+        max_tokens: AI_CONFIG.maxTokens,
+        stream: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      logger.error('AI API returned non-OK status in stream', { status: response.status, body: errBody });
+      yield* mockStream(generateFallbackResponse(history));
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (!trimmed.startsWith('data: ')) continue;
+
+        try {
+          const json = JSON.parse(trimmed.slice(6));
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) {
+            yield { content: delta, done: false, isMock: false };
+          }
+        } catch {
+          // skip malformed JSON lines
+        }
+      }
+    }
+
+    yield { content: '', done: true, isMock: false };
+  } catch (err) {
+    logger.error('AI API stream call failed', { error: err.message });
+    yield* mockStream(generateFallbackResponse(history));
+  }
+}
+
+async function* mockStream(text) {
+  for (const char of text) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    yield { content: char, done: false, isMock: true };
+  }
+  yield { content: '', done: true, isMock: true };
+}
+
+module.exports = { chat, chatStream, isConfigured, AI_CONFIG };
