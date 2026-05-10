@@ -47,6 +47,111 @@ async function chat(history) {
   }
 }
 
+async function chatStream(history, onChunk, onDone) {
+  const abortController = new AbortController();
+  let isAborted = false;
+
+  const cleanup = () => {
+    isAborted = true;
+    try {
+      abortController.abort();
+    } catch (e) {}
+  };
+
+  if (!isConfigured()) {
+    const fullContent = generateFallbackResponse(history);
+    for (let i = 0; i < fullContent.length; i++) {
+      if (isAborted) break;
+      onChunk(fullContent[i]);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!isAborted) onDone(fullContent, true);
+    return cleanup;
+  }
+
+  try {
+    const response = await fetch(AI_CONFIG.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: AI_CONFIG.model,
+        messages: [{ role: 'system', content: AI_CONFIG.systemPrompt }, ...history],
+        max_tokens: AI_CONFIG.maxTokens,
+        stream: true,
+      }),
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      logger.error('AI API returned non-OK status', { status: response.status, body: errBody });
+      const fullContent = generateFallbackResponse(history);
+      for (let i = 0; i < fullContent.length; i++) {
+        if (isAborted) break;
+        onChunk(fullContent[i]);
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (!isAborted) onDone(fullContent, true);
+      return cleanup;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let buffer = '';
+
+    while (true) {
+      if (isAborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (isAborted) break;
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (dataStr === '[DONE]') {
+          if (!isAborted) onDone(fullContent, false);
+          return cleanup;
+        }
+        try {
+          const data = JSON.parse(dataStr);
+          const delta = data.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            fullContent += delta;
+            onChunk(delta);
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+    }
+
+    if (!isAborted) onDone(fullContent || generateFallbackResponse(history), !fullContent);
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return cleanup;
+    }
+    logger.error('AI API stream failed', { error: err.message });
+    const fullContent = generateFallbackResponse(history);
+    for (let i = 0; i < fullContent.length; i++) {
+      if (isAborted) break;
+      onChunk(fullContent[i]);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!isAborted) onDone(fullContent, true);
+  }
+
+  return cleanup;
+}
+
 function generateFallbackResponse(history) {
   const lastUserMsg = [...history].reverse().find(m => m.role === 'user')?.content || '';
   const snippet = lastUserMsg.substring(0, 30);
@@ -59,4 +164,4 @@ function generateFallbackResponse(history) {
   return responses[Math.floor(Math.random() * responses.length)];
 }
 
-module.exports = { chat, isConfigured, AI_CONFIG };
+module.exports = { chat, chatStream, isConfigured, AI_CONFIG };
