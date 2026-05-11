@@ -1,6 +1,5 @@
 const logger = require('./logger');
 
-// AI provider configuration — extend this to support more providers
 const AI_CONFIG = {
   apiKey: process.env.AI_API_KEY || '',
   apiUrl: process.env.AI_API_URL || 'https://api.openai.com/v1/chat/completions',
@@ -47,6 +46,91 @@ async function chat(history) {
   }
 }
 
+async function* chatStream(history, abortSignal) {
+  if (!isConfigured()) {
+    const mockContent = generateFallbackResponse(history);
+    for (let i = 0; i < mockContent.length; i++) {
+      if (abortSignal.aborted) return;
+      yield { content: mockContent[i], done: false, isMock: true };
+      await new Promise(r => setTimeout(r, 50));
+    }
+    yield { content: '', done: true, isMock: true };
+    return;
+  }
+
+  try {
+    const response = await fetch(AI_CONFIG.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: AI_CONFIG.model,
+        messages: [{ role: 'system', content: AI_CONFIG.systemPrompt }, ...history],
+        max_tokens: AI_CONFIG.maxTokens,
+        stream: true,
+      }),
+      signal: abortSignal,
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      logger.error('AI API returned non-OK status', { status: response.status, body: errBody });
+      const mockContent = generateFallbackResponse(history);
+      for (let i = 0; i < mockContent.length; i++) {
+        if (abortSignal.aborted) return;
+        yield { content: mockContent[i], done: false, isMock: true };
+        await new Promise(r => setTimeout(r, 50));
+      }
+      yield { content: '', done: true, isMock: true };
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      if (abortSignal.aborted) {
+        await reader.cancel();
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') {
+            yield { content: '', done: true, isMock: false };
+            return;
+          }
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) {
+              yield { content: delta, done: false, isMock: false };
+            }
+          } catch (e) {
+            logger.warn('Failed to parse SSE data', { data });
+          }
+        }
+      }
+    }
+    yield { content: '', done: true, isMock: false };
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      logger.error('AI stream call failed', { error: err.message });
+    }
+    yield { content: '', done: true, isMock: false };
+  }
+}
+
 function generateFallbackResponse(history) {
   const lastUserMsg = [...history].reverse().find(m => m.role === 'user')?.content || '';
   const snippet = lastUserMsg.substring(0, 30);
@@ -59,4 +143,4 @@ function generateFallbackResponse(history) {
   return responses[Math.floor(Math.random() * responses.length)];
 }
 
-module.exports = { chat, isConfigured, AI_CONFIG };
+module.exports = { chat, chatStream, isConfigured, AI_CONFIG, generateFallbackResponse };
